@@ -312,25 +312,33 @@ def dump_views(cfg: ConnectionConfig, dump_dir: Path) -> bool:
     if not views:
         print_skip("Views не найдены — пропускаем")
         return True
+
     all_parts = []
+
     for schema, view_list in views.items():
         print(f"    {schema}: {', '.join(view_list)}")
+
         cmd = (["mysqldump"] + build_base_args(cfg)
                + [schema] + view_list
                + ["--no-create-db", "--no-data", "--skip-triggers",
                   "--routines=0", "--events=0"]
                + COMMON_FLAGS)
-        result = subprocess.run(cmd, capture_output=True, text=True)
+
+        result = subprocess.run(cmd, capture_output=True)
+
         if result.returncode != 0:
-            lines = _filter_stderr(result.stderr)
-            if lines: print_err("\n".join(lines))
+            lines = _filter_stderr(result.stderr.decode("utf-8", errors="ignore"))
+            if lines:
+                print_err("\n".join(lines))
             return False
-        all_parts.append(result.stdout)
+
+        all_parts.append(result.stdout.decode("utf-8"))
+
     out_file = dump_dir / "views.sql"
     out_file.write_text("\n".join(all_parts), encoding="utf-8")
+
     print_ok(f"views.sql ({sum(len(v) for v in views.values())} view(s))")
     return True
-
 
 def dump_triggers(cfg: ConnectionConfig, dump_dir: Path) -> bool:
     print_step("4/6", "Triggers")
