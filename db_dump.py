@@ -161,11 +161,14 @@ def run_to_file(cmd: list, output_file: Path, description: str = "") -> bool:
     label = description or output_file.name
     try:
         output_file.parent.mkdir(parents=True, exist_ok=True)
-        with open(output_file, "w", encoding="utf-8") as out:
-            result = subprocess.run(cmd, stdout=out, stderr=subprocess.PIPE, text=True)
+        # Открываем в бинарном режиме — байты от mysqldump идут на диск без
+        # какого-либо перекодирования Python/системой. Кириллица сохраняется
+        # ровно так, как её отдаёт mysqldump (utf8mb4).
+        with open(output_file, "wb") as out:
+            result = subprocess.run(cmd, stdout=out, stderr=subprocess.PIPE)
         if result.returncode != 0:
             print_err(f"{label} — код {result.returncode}")
-            lines = _filter_stderr(result.stderr)
+            lines = _filter_stderr(result.stderr.decode("utf-8", errors="replace"))
             if lines:
                 print_err("\n    ".join(lines))
             return False
@@ -184,11 +187,12 @@ def run_to_file(cmd: list, output_file: Path, description: str = "") -> bool:
 def run_from_file(cmd: list, input_file: Path, description: str = "") -> bool:
     label = description or input_file.name
     try:
-        with open(input_file, "r", encoding="utf-8") as f:
-            result = subprocess.run(cmd, stdin=f, capture_output=True, text=True)
+        # Бинарный режим: mysql читает байты напрямую, без конвертации Python
+        with open(input_file, "rb") as f:
+            result = subprocess.run(cmd, stdin=f, capture_output=True)
         if result.returncode != 0:
             print_err(f"{label} — код {result.returncode}")
-            lines = _filter_stderr(result.stderr)
+            lines = _filter_stderr(result.stderr.decode("utf-8", errors="replace"))
             if lines:
                 print_err("\n    ".join(lines))
             return False
@@ -199,8 +203,8 @@ def run_from_file(cmd: list, input_file: Path, description: str = "") -> bool:
 
 
 def run_query(cfg: ConnectionConfig, query: str) -> Optional[str]:
-    cmd = ["mysql"] + build_base_args(cfg) + ["-N", "-e", query]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    cmd = ["mysql"] + build_base_args(cfg) + ["--default-character-set=utf8mb4", "-N", "-e", query]
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
     if result.returncode != 0:
         lines = _filter_stderr(result.stderr)
         if lines:
@@ -327,12 +331,14 @@ def dump_views(cfg: ConnectionConfig, dump_dir: Path) -> bool:
         result = subprocess.run(cmd, capture_output=True)
 
         if result.returncode != 0:
-            lines = _filter_stderr(result.stderr.decode("utf-8", errors="ignore"))
+            lines = _filter_stderr(result.stderr.decode("utf-8", errors="replace"))
             if lines:
                 print_err("\n".join(lines))
             return False
 
-        all_parts.append(result.stdout.decode("utf-8"))
+        # Добавляем USE чтобы views.sql не падал с "No database selected"
+        # (дамп без --databases не включает эту директиву автоматически)
+        all_parts.append(f"USE `{schema}`;\n" + result.stdout.decode("utf-8", errors="replace"))
 
     out_file = dump_dir / "views.sql"
     out_file.write_text("\n".join(all_parts), encoding="utf-8")
@@ -380,12 +386,50 @@ def dump_events(cfg: ConnectionConfig, dump_dir: Path) -> bool:
 # RESTORE
 # ─────────────────────────────────────────────
 
-RESTORE_ORDER = ["structure.sql", "data.sql", "views.sql",
-                 "routines.sql", "triggers.sql", "events.sql"]
+# routines идут ПЕРВЫМИ — structure.sql может содержать DEFAULT/CHECK
+# выражения, ссылающиеся на функции; без routines такой импорт упадёт.
+RESTORE_ORDER = ["routines.sql", "structure.sql", "data.sql",
+                 "views.sql", "triggers.sql", "events.sql"]
 
 
-def restore(cfg: ConnectionConfig, dump_dir: Path) -> bool:
+def _get_databases_from_dir(dump_dir: Path) -> list[str]:
+    """Извлекает список баз из structure.sql (строки CREATE DATABASE)."""
+    struct = dump_dir / "structure.sql"
+    if not struct.exists():
+        return []
+    dbs = []
+    for line in struct.read_bytes().decode("utf-8", errors="replace").splitlines():
+        m = re.match(r"CREATE DATABASE[^`]*`([^`]+)`", line, re.IGNORECASE)
+        if m:
+            dbs.append(m.group(1))
+    return dbs
+
+
+def drop_and_recreate_databases(cfg: ConnectionConfig, dump_dir: Path) -> bool:
+    """DROP + CREATE каждой базы — чистый старт перед restore."""
+    dbs = _get_databases_from_dir(dump_dir)
+    if not dbs:
+        print_err("Не удалось определить список баз из structure.sql")
+        return False
+    for db in dbs:
+        print(f"    DROP DATABASE IF EXISTS `{db}`  →  CREATE DATABASE")
+        ok1 = run_query(cfg, f"DROP DATABASE IF EXISTS `{db}`;") is not None
+        ok2 = run_query(cfg, f"CREATE DATABASE `{db}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;") is not None
+        if not (ok1 and ok2):
+            print_err(f"Не удалось пересоздать базу `{db}`")
+            return False
+    return True
+
+
+def restore(cfg: ConnectionConfig, dump_dir: Path,
+            force: bool = False, clean: bool = False) -> bool:
     print_header(f"RESTORE  {cfg.label()}  ←  {dump_dir}")
+
+    if clean:
+        print_step("PRE", "Сброс баз (--clean)")
+        if not drop_and_recreate_databases(cfg, dump_dir):
+            return False
+
     errors = False
     t0 = time.time()
     for filename in RESTORE_ORDER:
@@ -394,12 +438,18 @@ def restore(cfg: ConnectionConfig, dump_dir: Path) -> bool:
             print_skip(f"{filename} — не найден, пропуск")
             continue
         print_step("→", filename)
-        cmd = ["mysql"] + build_base_args(cfg)
+        cmd = ["mysql"] + build_base_args(cfg) + ["--default-character-set=utf8mb4"]
+        if force:
+            cmd.append("--force")   # продолжать при ошибках (не останавливаться)
         ok = run_from_file(cmd, sql_file, filename)
         if ok:
             print_ok(f"{filename} — импортирован")
         else:
             errors = True
+            if not force:
+                print_err("Остановка. Используйте --force чтобы продолжать при ошибках,")
+                print_err("или --clean для сброса баз перед restore.")
+                break
     elapsed = time.time() - t0
     print_header("ИТОГ RESTORE")
     if errors:
@@ -572,6 +622,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_res = sub.add_parser("restore", help="Восстановить из .sql (target)")
     p_res.add_argument("--dir", default="dump")
+    p_res.add_argument(
+        "--force", action="store_true",
+        help="Продолжать при ошибках (передаёт --force в mysql)"
+    )
+    p_res.add_argument(
+        "--clean", action="store_true",
+        help="DROP + CREATE каждой базы перед импортом (чистый старт)"
+    )
     _add_tgt_args(p_res)
 
     p_views = sub.add_parser("views", help="Показать views в source базах")
@@ -613,7 +671,8 @@ def main() -> None:
         tgt = _apply_tgt(load_target_config(), args)
         if not test_connection(tgt, f"TARGET {tgt.label()}"):
             sys.exit(1)
-        ok = restore(tgt, Path(args.dir))
+        ok = restore(tgt, Path(args.dir),
+                     force=args.force, clean=args.clean)
         sys.exit(0 if ok else 1)
 
     if args.command == "views":
