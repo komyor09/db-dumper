@@ -157,6 +157,32 @@ def _filter_stderr(text: str) -> list:
     return [l for l in text.splitlines() if not any(n in l for n in noise)]
 
 
+_SPINNER_FRAMES = ["⠋", "⠙", "⠸", "⠴", "⠦", "⠇"]
+_spinner_idx = 0
+
+def _print_progress_spinner(written: int, label: str) -> None:
+    global _spinner_idx
+    frame = _SPINNER_FRAMES[_spinner_idx % len(_SPINNER_FRAMES)]
+    _spinner_idx += 1
+    mb = written / 1_048_576
+    print(f"\r  {frame}  {label}  {mb:.1f} MB записано…", end="", flush=True)
+
+
+def _print_progress(current: int, total: int, label: str, done: bool = False) -> None:
+    """Печатает однострочный прогрессбар в терминал."""
+    if total <= 0:
+        return
+    pct = min(current / total, 1.0)
+    bar_w = 30
+    filled = int(bar_w * pct)
+    bar = "█" * filled + "░" * (bar_w - filled)
+    mb_cur = current / 1_048_576
+    mb_tot = total / 1_048_576
+    end = "\n" if done else "\r"
+    suffix = "✓" if done else f"{pct*100:5.1f}%"
+    print(f"  [{bar}] {mb_cur:6.1f}/{mb_tot:.1f} MB  {suffix}", end=end, flush=True)
+
+
 def run_to_file(cmd: list, output_file: Path, description: str = "") -> bool:
     label = description or output_file.name
     try:
@@ -165,21 +191,35 @@ def run_to_file(cmd: list, output_file: Path, description: str = "") -> bool:
         # какого-либо перекодирования Python/системой. Кириллица сохраняется
         # ровно так, как её отдаёт mysqldump (utf8mb4).
         with open(output_file, "wb") as out:
-            result = subprocess.run(cmd, stdout=out, stderr=subprocess.PIPE)
-        if result.returncode != 0:
-            print_err(f"{label} — код {result.returncode}")
-            lines = _filter_stderr(result.stderr.decode("utf-8", errors="replace"))
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            written = 0
+            chunk_size = 256 * 1024
+            while True:
+                chunk = proc.stdout.read(chunk_size)
+                if not chunk:
+                    break
+                out.write(chunk)
+                written += len(chunk)
+                _print_progress_spinner(written, label)
+            proc.wait()
+        print(f"\r  ✓  {label}  ({written/1_048_576:.1f} MB)" + " " * 20)
+        if proc.returncode != 0:
+            print_err(f"{label} — код {proc.returncode}")
+            lines = _filter_stderr(proc.stderr.read().decode("utf-8", errors="replace"))
             if lines:
                 print_err("\n    ".join(lines))
             return False
         return True
     except FileNotFoundError:
+        print()
         print_err(f"Команда не найдена: {cmd[0]}")
         return False
     except PermissionError as e:
+        print()
         print_err(f"Нет прав на запись: {e}")
         return False
     except Exception as e:
+        print()
         print_err(f"Ошибка: {e}")
         return False
 
@@ -187,17 +227,35 @@ def run_to_file(cmd: list, output_file: Path, description: str = "") -> bool:
 def run_from_file(cmd: list, input_file: Path, description: str = "") -> bool:
     label = description or input_file.name
     try:
-        # Бинарный режим: mysql читает байты напрямую, без конвертации Python
+        file_size = input_file.stat().st_size
         with open(input_file, "rb") as f:
-            result = subprocess.run(cmd, stdin=f, capture_output=True)
-        if result.returncode != 0:
-            print_err(f"{label} — код {result.returncode}")
-            lines = _filter_stderr(result.stderr.decode("utf-8", errors="replace"))
+            proc = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            chunk_size = 256 * 1024  # 256 KB
+            sent = 0
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                proc.stdin.write(chunk)
+                sent += len(chunk)
+                _print_progress(sent, file_size, label)
+            proc.stdin.close()
+            proc.wait()
+        _print_progress(file_size, file_size, label, done=True)
+        if proc.returncode != 0:
+            print_err(f"{label} — код {proc.returncode}")
+            lines = _filter_stderr(proc.stderr.read().decode("utf-8", errors="replace"))
             if lines:
                 print_err("\n    ".join(lines))
             return False
         return True
     except Exception as e:
+        print()
         print_err(f"{label}: {e}")
         return False
 
@@ -438,7 +496,10 @@ def restore(cfg: ConnectionConfig, dump_dir: Path,
             print_skip(f"{filename} — не найден, пропуск")
             continue
         print_step("→", filename)
-        cmd = ["mysql"] + build_base_args(cfg) + ["--default-character-set=utf8mb4"]
+        cmd = ["mysql"] + build_base_args(cfg) + [
+            "--default-character-set=utf8mb4",
+            '--init-command=SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;',
+        ]
         if force:
             cmd.append("--force")   # продолжать при ошибках (не останавливаться)
         ok = run_from_file(cmd, sql_file, filename)
