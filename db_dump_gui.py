@@ -12,6 +12,11 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+# Скрываем консольные окна на Windows
+_POPEN_KW: dict = {}
+if sys.platform == "win32":
+    _POPEN_KW["creationflags"] = subprocess.CREATE_NO_WINDOW
+
 CONFIG_PATH = Path.home() / ".db_dump_config.json"
 
 # ─────────────────────────────────────────────
@@ -278,7 +283,7 @@ class SourcePage(tk.Frame):
                    f"--user={cfg['user']}", f"--password={cfg['password']}",
                    "--default-character-set=utf8mb4", "-N", "-e", "SELECT VERSION();"]
             try:
-                r = subprocess.run(cmd, capture_output=True, timeout=8)
+                r = subprocess.run(cmd, capture_output=True, timeout=8, **_POPEN_KW)
                 if r.returncode == 0:
                     ver = r.stdout.decode("utf-8", errors="replace").strip()
                     self.after(0, lambda: self._status.configure(
@@ -364,7 +369,7 @@ class TargetPage(tk.Frame):
                    f"--user={cfg['user']}", f"--password={cfg['password']}",
                    "--default-character-set=utf8mb4", "-N", "-e", "SELECT VERSION();"]
             try:
-                r = subprocess.run(cmd, capture_output=True, timeout=8)
+                r = subprocess.run(cmd, capture_output=True, timeout=8, **_POPEN_KW)
                 if r.returncode == 0:
                     ver = r.stdout.decode("utf-8", errors="replace").strip()
                     self.after(0, lambda: self._status.configure(
@@ -522,7 +527,7 @@ class DumpPage(tk.Frame):
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, encoding="utf-8", errors="replace",
-                    bufsize=1
+                    bufsize=1, **_POPEN_KW
                 )
                 for line in proc.stdout:
                     line = line.rstrip()
@@ -690,7 +695,8 @@ class RestorePage(tk.Frame):
             try:
                 proc = subprocess.Popen(
                     cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, encoding="utf-8", errors="replace", bufsize=1
+                    text=True, encoding="utf-8", errors="replace", bufsize=1,
+                    **_POPEN_KW
                 )
                 for line in proc.stdout:
                     line = line.rstrip()

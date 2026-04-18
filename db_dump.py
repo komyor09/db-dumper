@@ -6,6 +6,7 @@ Source и Target — отдельные конфиги подключения.
 
 import argparse
 import getpass
+import io
 import json
 import re
 import subprocess
@@ -14,6 +15,11 @@ import time
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
 from typing import Optional
+
+# Принудительно utf-8 для stdout/stderr на Windows (cp1251 не поддерживает ─ ✓ ✗ →)
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 
 # ─────────────────────────────────────────────
@@ -124,7 +130,7 @@ def print_skip(msg: str) -> None:
 
 def check_tool(name: str) -> bool:
     finder = "where" if sys.platform == "win32" else "which"
-    result = subprocess.run([finder, name], capture_output=True)
+    result = subprocess.run([finder, name], capture_output=True, **_POPEN_KW)
     return result.returncode == 0
 
 
@@ -185,6 +191,12 @@ def _filter_stderr(text: str) -> list:
     return [l for l in text.splitlines() if not any(n in l for n in noise)]
 
 
+# Скрываем консольные окна на Windows для всех дочерних процессов
+_POPEN_KW: dict = {}
+if sys.platform == "win32":
+    _POPEN_KW["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+
 _SPINNER_FRAMES = ["⠋", "⠙", "⠸", "⠴", "⠦", "⠇"]
 _spinner_idx = 0
 
@@ -217,7 +229,7 @@ def run_to_file(cmd: list, output_file: Path, description: str = "") -> bool:
         output_file.parent.mkdir(parents=True, exist_ok=True)
         with open(output_file, "wb") as out:
             out.write(_charset_header())
-            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **_POPEN_KW)
             written = 0
             chunk_size = 256 * 1024
             while True:
@@ -261,6 +273,7 @@ def run_from_file(cmd: list, input_file: Path, description: str = "") -> bool:
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                **_POPEN_KW,
             )
             chunk_size = 256 * 1024  # 256 KB
             sent = 0
@@ -289,7 +302,7 @@ def run_from_file(cmd: list, input_file: Path, description: str = "") -> bool:
 
 def run_query(cfg: ConnectionConfig, query: str) -> Optional[str]:
     cmd = ["mysql"] + build_base_args(cfg) + ["--default-character-set=utf8mb4", "-N", "-e", query]
-    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+    result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", **_POPEN_KW)
     if result.returncode != 0:
         lines = _filter_stderr(result.stderr)
         if lines:
@@ -430,7 +443,7 @@ def dump_views(cfg: ConnectionConfig, dump_dir: Path) -> bool:
                   "--routines=0", "--events=0"]
                + COMMON_FLAGS)
 
-        result = subprocess.run(cmd, capture_output=True)
+        result = subprocess.run(cmd, capture_output=True, **_POPEN_KW)
 
         if result.returncode != 0:
             lines = _filter_stderr(result.stderr.decode("utf-8", errors="replace"))
