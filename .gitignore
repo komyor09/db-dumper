@@ -1,13 +1,5 @@
 /.venv
 /dump
 /dist
+/build
 .spec
-/build/db_dump_gui/Analysis-00.toc
-/build/db_dump_gui/base_library.zip
-/build/db_dump_gui/db_dump_gui.pkg
-/build/db_dump_gui/EXE-00.toc
-/build/db_dump_gui/PKG-00.toc
-/build/db_dump_gui/PYZ-00.pyz
-/build/db_dump_gui/PYZ-00.toc
-/build/db_dump_gui/warn-db_dump_gui.txt
-/build/db_dump_gui/xref-db_dump_gui.html
