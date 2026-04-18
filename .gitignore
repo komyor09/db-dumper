@@ -2,4 +2,4 @@
 /dump
 /dist
 /build
-.spec
+/db_dump_gui.spec
