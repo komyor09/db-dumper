@@ -1,5 +1,6 @@
 /.venv
 /dump
 /dist
+/.idea
 /build
 /db_dump_gui.spec
