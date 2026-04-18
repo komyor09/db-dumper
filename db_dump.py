@@ -149,6 +149,34 @@ def build_base_args(cfg: ConnectionConfig) -> list:
     ]
 
 
+def build_dump_args(cfg: ConnectionConfig) -> list:
+    """Аргументы для mysqldump с принудительным utf8mb4 charset.
+
+    MySQL 8.0 клиент + MariaDB 10.0 сервер: --default-character-set
+    игнорируется сервером (ставит latin1). Единственный надёжный способ —
+    записать charset в временный .cnf и передать через --defaults-extra-file.
+    """
+    import tempfile, atexit, os
+    cnf = tempfile.NamedTemporaryFile(
+        mode="w", suffix=".cnf", delete=False, encoding="utf-8"
+    )
+    cnf.write("[mysqldump]\n")
+    cnf.write("default-character-set=utf8mb4\n")
+    cnf.write("[mysql]\n")
+    cnf.write("default-character-set=utf8mb4\n")
+    cnf.write("[client]\n")
+    cnf.write("default-character-set=utf8mb4\n")
+    cnf.close()
+    atexit.register(os.unlink, cnf.name)
+    return [
+        f"--defaults-extra-file={cnf.name}",
+        f"--host={cfg.host}",
+        f"--port={cfg.port}",
+        f"--user={cfg.user}",
+        f"--password={cfg.password}",
+    ]
+
+
 def _filter_stderr(text: str) -> list:
     noise = [
         "Using a password on the command line",
@@ -187,10 +215,8 @@ def run_to_file(cmd: list, output_file: Path, description: str = "") -> bool:
     label = description or output_file.name
     try:
         output_file.parent.mkdir(parents=True, exist_ok=True)
-        # Открываем в бинарном режиме — байты от mysqldump идут на диск без
-        # какого-либо перекодирования Python/системой. Кириллица сохраняется
-        # ровно так, как её отдаёт mysqldump (utf8mb4).
         with open(output_file, "wb") as out:
+            out.write(_charset_header())
             proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
             written = 0
             chunk_size = 256 * 1024
@@ -202,6 +228,7 @@ def run_to_file(cmd: list, output_file: Path, description: str = "") -> bool:
                 written += len(chunk)
                 _print_progress_spinner(written, label)
             proc.wait()
+            out.write(_charset_footer())
         print(f"\r  ✓  {label}  ({written/1_048_576:.1f} MB)" + " " * 20)
         if proc.returncode != 0:
             print_err(f"{label} — код {proc.returncode}")
@@ -345,9 +372,26 @@ def strip_definers(dump_dir: Path) -> bool:
 COMMON_FLAGS = ["--column-statistics=0", "--default-character-set=utf8mb4"]
 
 
+def _charset_header() -> bytes:
+    """Заголовок который вставляется в начало каждого .sql файла.
+    Гарантирует что mysql при импорте знает charset независимо от флагов."""
+    return (
+        b"/*!40101 SET @OLD_CHARACTER_SET_CLIENT=@@CHARACTER_SET_CLIENT */;\n"
+        b"/*!40101 SET NAMES utf8mb4 */;\n"
+        b"/*!40014 SET @OLD_FOREIGN_KEY_CHECKS=@@FOREIGN_KEY_CHECKS, FOREIGN_KEY_CHECKS=0 */;\n"
+    )
+
+
+def _charset_footer() -> bytes:
+    return (
+        b"/*!40014 SET FOREIGN_KEY_CHECKS=@OLD_FOREIGN_KEY_CHECKS */;\n"
+        b"/*!40101 SET CHARACTER_SET_CLIENT=@OLD_CHARACTER_SET_CLIENT */;\n"
+    )
+
+
 def dump_structure(cfg: ConnectionConfig, dump_dir: Path) -> bool:
     print_step("1/6", "Structure (таблицы)")
-    cmd = (["mysqldump"] + build_base_args(cfg)
+    cmd = (["mysqldump"] + build_dump_args(cfg)
            + ["--databases"] + cfg.databases
            + ["--no-data", "--skip-triggers", "--routines=0", "--events=0"]
            + COMMON_FLAGS)
@@ -358,7 +402,7 @@ def dump_structure(cfg: ConnectionConfig, dump_dir: Path) -> bool:
 
 def dump_data(cfg: ConnectionConfig, dump_dir: Path) -> bool:
     print_step("2/6", "Data (данные)")
-    cmd = (["mysqldump"] + build_base_args(cfg)
+    cmd = (["mysqldump"] + build_dump_args(cfg)
            + ["--databases"] + cfg.databases
            + ["--no-create-info", "--skip-triggers", "--routines=0", "--events=0",
               "--single-transaction", "--quick"]
@@ -380,7 +424,7 @@ def dump_views(cfg: ConnectionConfig, dump_dir: Path) -> bool:
     for schema, view_list in views.items():
         print(f"    {schema}: {', '.join(view_list)}")
 
-        cmd = (["mysqldump"] + build_base_args(cfg)
+        cmd = (["mysqldump"] + build_dump_args(cfg)
                + [schema] + view_list
                + ["--no-create-db", "--no-data", "--skip-triggers",
                   "--routines=0", "--events=0"]
@@ -406,7 +450,7 @@ def dump_views(cfg: ConnectionConfig, dump_dir: Path) -> bool:
 
 def dump_triggers(cfg: ConnectionConfig, dump_dir: Path) -> bool:
     print_step("4/6", "Triggers")
-    cmd = (["mysqldump"] + build_base_args(cfg)
+    cmd = (["mysqldump"] + build_dump_args(cfg)
            + ["--databases"] + cfg.databases
            + ["--no-data", "--no-create-info", "--triggers",
               "--skip-routines", "--skip-events"]
@@ -418,7 +462,7 @@ def dump_triggers(cfg: ConnectionConfig, dump_dir: Path) -> bool:
 
 def dump_routines(cfg: ConnectionConfig, dump_dir: Path) -> bool:
     print_step("5/6", "Routines")
-    cmd = (["mysqldump"] + build_base_args(cfg)
+    cmd = (["mysqldump"] + build_dump_args(cfg)
            + ["--databases"] + cfg.databases
            + ["--no-data", "--no-create-info", "--routines",
               "--skip-triggers", "--skip-events"]
@@ -430,7 +474,7 @@ def dump_routines(cfg: ConnectionConfig, dump_dir: Path) -> bool:
 
 def dump_events(cfg: ConnectionConfig, dump_dir: Path) -> bool:
     print_step("6/6", "Events")
-    cmd = (["mysqldump"] + build_base_args(cfg)
+    cmd = (["mysqldump"] + build_dump_args(cfg)
            + ["--databases"] + cfg.databases
            + ["--no-data", "--no-create-info", "--events",
               "--skip-triggers", "--skip-routines"]
@@ -498,7 +542,7 @@ def restore(cfg: ConnectionConfig, dump_dir: Path,
         print_step("→", filename)
         cmd = ["mysql"] + build_base_args(cfg) + [
             "--default-character-set=utf8mb4",
-            '--init-command=SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci;',
+            "--binary-mode",   # не трогать \r\n, не интерпретировать charset на ходу
         ]
         if force:
             cmd.append("--force")   # продолжать при ошибках (не останавливаться)
@@ -583,7 +627,50 @@ def configure_target() -> None:
     save_target_config(cfg)
 
 
-def show_config() -> None:
+def show_charsets(cfg: ConnectionConfig) -> None:
+    """Показывает charset каждой таблицы — помогает диагностировать ?????."""
+    if not cfg.databases:
+        print_err("Список баз пуст. Запустите: db_dump.py config-source")
+        return
+    schemas = ",".join(f"'{db}'" for db in cfg.databases)
+    query = (
+        "SELECT TABLE_SCHEMA, TABLE_NAME, "
+        "CCSA.CHARACTER_SET_NAME, TABLE_COLLATION "
+        "FROM information_schema.TABLES t "
+        "JOIN information_schema.COLLATION_CHARACTER_SET_APPLICABILITY CCSA "
+        "  ON CCSA.COLLATION_NAME = t.TABLE_COLLATION "
+        f"WHERE TABLE_SCHEMA IN ({schemas}) "
+        "ORDER BY TABLE_SCHEMA, TABLE_NAME;"
+    )
+    out = run_query(cfg, query)
+    if not out:
+        print_err("Не удалось получить информацию о charset")
+        return
+    print_header("CHARSET ТАБЛИЦ (source)")
+    non_utf8 = []
+    for line in out.splitlines():
+        parts = line.split("\t")
+        if len(parts) == 4:
+            schema, table, charset, collation = parts
+            marker = "  ⚠ " if charset.lower() not in ("utf8", "utf8mb4") else "    "
+            print(f"{marker}{schema}.{table}  →  {charset} / {collation}")
+            if charset.lower() not in ("utf8", "utf8mb4"):
+                non_utf8.append(f"{schema}.{table} ({charset})")
+    if non_utf8:
+        print()
+        print_err("Таблицы НЕ в utf8/utf8mb4 — вероятная причина ?????:")
+        for t in non_utf8:
+            print(f"    ✗  {t}")
+        print()
+        print("  Для конвертации выполните на source:")
+        for t in non_utf8:
+            schema_tbl = t.split(" ")[0]
+            print(f"    ALTER TABLE {schema_tbl} CONVERT TO CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;")
+    else:
+        print_ok("Все таблицы в utf8/utf8mb4 — charset не является причиной ?????")
+
+
+
     raw = _load_raw()
     print_header("ТЕКУЩИЙ КОНФИГ")
     for role in ("source", "target"):
@@ -693,8 +780,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_tgt_args(p_res)
 
-    p_views = sub.add_parser("views", help="Показать views в source базах")
+    p_views = sub.add_parser("views",   help="Показать views в source базах")
     _add_src_args(p_views)
+
+    p_cs = sub.add_parser("charset", help="Диагностика charset таблиц (причина ?????)")
+    _add_src_args(p_cs)
 
     return parser
 
@@ -735,6 +825,14 @@ def main() -> None:
         ok = restore(tgt, Path(args.dir),
                      force=args.force, clean=args.clean)
         sys.exit(0 if ok else 1)
+
+    if args.command == "charset":
+        require_tools("mysql")
+        src = _apply_src(load_source_config(), args)
+        if not test_connection(src, f"SOURCE {src.label()}"):
+            sys.exit(1)
+        show_charsets(src)
+        return
 
     if args.command == "views":
         require_tools("mysql")
