@@ -3,7 +3,8 @@
 MySQL Dump & Restore Utility
 Source и Target — отдельные конфиги подключения.
 """
-
+# Самая первая строка после импортов
+print("=== BUILD VERSION: 999 db_dump ===", flush=True)
 import argparse
 import getpass
 import io

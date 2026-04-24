@@ -3,6 +3,8 @@
 db_dump GUI — графический интерфейс для db_dump.py
 Запуск: python db_dump_gui.py
 """
+# Самая первая строка после импортов
+print("=== BUILD VERSION: 999 db_dump_gui ===", flush=True)
 
 import json
 import subprocess
@@ -16,6 +18,33 @@ from tkinter import filedialog, messagebox, ttk
 _POPEN_KW: dict = {}
 if sys.platform == "win32":
     _POPEN_KW["creationflags"] = subprocess.CREATE_NO_WINDOW
+
+# Резолвим пути к db_dump.py и Python интерпретатору
+# sys.frozen — True когда запущено из PyInstaller .exe
+if getattr(sys, "frozen", False):
+    # Запущено как .exe — папка самого .exe
+    _BASE_DIR = Path(sys.executable).parent
+    # sys.executable это сам GUI .exe — нужно найти python.exe отдельно
+    # Ищем: рядом с exe → PATH → fallback
+    def _find_python() -> str:
+        import shutil
+        # 1. python.exe рядом с exe (если положили вместе)
+        local = _BASE_DIR / "python.exe"
+        if local.exists():
+            return str(local)
+        # 2. python в PATH
+        found = shutil.which("python") or shutil.which("python3")
+        if found:
+            return found
+        # 3. Fallback — выбросит понятную ошибку позже
+        return "python"
+    _PYTHON = _find_python()
+else:
+    # Запущено как python db_dump_gui.py — используем тот же интерпретатор
+    _BASE_DIR = Path(__file__).parent
+    _PYTHON = sys.executable
+
+DB_DUMP_SCRIPT = str(_BASE_DIR / "db_dump.py")
 
 CONFIG_PATH = Path.home() / ".db_dump_config.json"
 
@@ -505,7 +534,7 @@ class DumpPage(tk.Frame):
 
         def run():
             steps = ["config-show", None]  # dummy
-            cmd = [sys.executable, "db_dump.py", "dump",
+            cmd = [_PYTHON, DB_DUMP_SCRIPT, "dump",
                    f"--src-host={src['host']}",
                    f"--src-port={src['port']}",
                    f"--src-user={src['user']}",
@@ -552,9 +581,9 @@ class DumpPage(tk.Frame):
                     fg=ACCENT2 if ok else DANGER))
             except FileNotFoundError:
                 self.after(0, lambda: self._write(
-                    "✗ db_dump.py не найден в текущей папке", "err"))
+                    f"✗ db_dump.py не найден: {DB_DUMP_SCRIPT}", "err"))
                 self.after(0, lambda: self._status.configure(
-                    text="✗ Файл db_dump.py не найден", fg=DANGER))
+                    text="✗ db_dump.py не найден рядом с exe", fg=DANGER))
             finally:
                 self._running = False
                 self.after(0, lambda: self._run_btn.configure(
@@ -674,7 +703,7 @@ class RestorePage(tk.Frame):
         dir_ = self._dir.get() or "dump"
 
         def run():
-            cmd = [sys.executable, "db_dump.py", "restore",
+            cmd = [_PYTHON, DB_DUMP_SCRIPT, "restore",
                    f"--tgt-host={tgt['host']}",
                    f"--tgt-port={tgt['port']}",
                    f"--tgt-user={tgt['user']}",
@@ -721,9 +750,9 @@ class RestorePage(tk.Frame):
                     fg=ACCENT2 if ok else DANGER))
             except FileNotFoundError:
                 self.after(0, lambda: self._write(
-                    "✗ db_dump.py не найден в текущей папке", "err"))
+                    f"✗ db_dump.py не найден: {DB_DUMP_SCRIPT}", "err"))
                 self.after(0, lambda: self._status.configure(
-                    text="✗ Файл db_dump.py не найден", fg=DANGER))
+                    text="✗ db_dump.py не найден рядом с exe", fg=DANGER))
             finally:
                 self._running = False
                 self.after(0, lambda: self._run_btn.configure(

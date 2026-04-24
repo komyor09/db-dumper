@@ -13,19 +13,19 @@ if errorlevel 1 (
     echo  [ERROR] Python not found in PATH
     pause & exit /b 1
 )
-for /f "tokens=*" %%v in ('python --version 2^>^&1') do echo  [1/5] %%v
+for /f "tokens=*" %%v in ('python --version 2^>^&1') do echo  [1/6] %%v
 
 :: ── 2. PyInstaller ────────────────────────────
-echo  [2/5] Checking PyInstaller...
+echo  [2/6] Checking PyInstaller...
 pip show pyinstaller >nul 2>&1
 if errorlevel 1 (
-    echo  [2/5] Installing PyInstaller...
+    echo  [2/6] Installing PyInstaller...
     pip install pyinstaller --quiet
 )
-echo  [2/5] PyInstaller OK
+echo  [2/6] PyInstaller OK
 
 :: ── 3. Файлы ──────────────────────────────────
-echo  [3/5] Checking files...
+echo  [3/6] Checking files...
 if not exist "db_dump.py" (
     echo  [ERROR] db_dump.py not found
     pause & exit /b 1
@@ -34,75 +34,60 @@ if not exist "db_dump_gui.py" (
     echo  [ERROR] db_dump_gui.py not found
     pause & exit /b 1
 )
-echo  [3/5] Files OK
+echo  [3/6] Files OK
 
 :: ── 4. Иконка ─────────────────────────────────
-echo  [4/5] Preparing icon...
+echo  [4/6] Preparing icon...
 set ICON_FLAG=
 if exist "icon.ico" (
-    :: icon.ico уже есть — используем напрямую, без конвертации
     set ICON_FLAG=--icon=icon.ico
-    echo  [4/5] icon.ico found - OK
+    echo  [4/6] icon.ico found - OK
 ) else if exist "icon.png" (
     pip show pillow >nul 2>&1
-    if errorlevel 1 (
-        echo  [4/5] Installing Pillow...
-        pip install pillow --quiet
-    )
+    if errorlevel 1 pip install pillow --quiet
     python -c "from PIL import Image; img=Image.open('icon.png'); img.save('icon.ico', format='ICO', sizes=[(256,256),(128,128),(64,64),(48,48),(32,32),(16,16)])"
     if errorlevel 1 (
-        echo  [4/5] WARNING: icon conversion failed, building without icon
+        echo  [4/6] WARNING: icon conversion failed, building without icon
     ) else (
         set ICON_FLAG=--icon=icon.ico
-        echo  [4/5] icon.png converted to icon.ico - OK
+        echo  [4/6] icon.png converted - OK
     )
 ) else (
-    echo  [4/5] No icon found - building without icon
+    echo  [4/6] No icon found - building without icon
 )
 
 :: ── 5. Полная очистка ─────────────────────────
-echo  [5/5] Full clean...
-
-:: Удаляем артефакты сборки
+echo  [5/6] Full clean...
 if exist "dist"             rmdir /s /q dist
 if exist "build"            rmdir /s /q build
 if exist "db_dump_gui.spec" del /q db_dump_gui.spec
-
-:: ВАЖНО: удаляем .pyc кеш — именно он вызывает проблему "старого кода"
-if exist "__pycache__" rmdir /s /q __pycache__
-for /d /r . %%d in (__pycache__) do (
-    if exist "%%d" rmdir /s /q "%%d"
-)
+if exist "__pycache__"      rmdir /s /q __pycache__
+for /d /r . %%d in (__pycache__) do if exist "%%d" rmdir /s /q "%%d"
 del /s /q *.pyc >nul 2>&1
-
-echo  [5/5] Clean OK
+echo  [5/6] Clean OK
 
 :: ── 6. Сборка ─────────────────────────────────
-echo.
-echo  Building...
+echo  [6/6] Building exe...
 echo.
 
 ::
-:: КЛЮЧЕВЫЕ ИЗМЕНЕНИЯ vs старый build_exe.bat:
+:: АРХИТЕКТУРА:
+::   db_dump_gui.exe  — GUI (PyInstaller bundle, содержит Python runtime)
+::   db_dump.py       — CLI скрипт, лежит РЯДОМ с .exe, запускается через subprocess
 ::
-:: 1. БЕЗ --add-data "db_dump.py;."
-::    db_dump.py — это Python модуль, PyInstaller находит его сам через import analysis.
-::    --add-data копирует файл как data (в temp), но import берёт скомпилированную
-::    версию из PKG-архива — получаются две копии, используется старая.
+:: db_dump_gui.py резолвит путь к db_dump.py через sys.executable:
+::   _BASE_DIR = Path(sys.executable).parent   (когда frozen)
+::   DB_DUMP_SCRIPT = _BASE_DIR / "db_dump.py"
 ::
-:: 2. --clean — принудительно чистит internal PyInstaller cache (в %APPDATA%)
-::    Именно этот кеш хранит скомпилированный .pyc даже после удаления dist/ и build/
+:: Поэтому db_dump.py НЕ встраивается в exe, а копируется рядом после сборки.
 ::
-:: 3. db_dump.py передаётся через --hidden-import — PyInstaller включает его
-::    как нормальный Python модуль, а не data-файл.
-::
+
 pyinstaller ^
     --clean ^
     --noconfirm ^
     --onefile ^
     --windowed ^
     --name "db_dump_gui" ^
-    --hidden-import db_dump ^
     --hidden-import tkinter ^
     --hidden-import tkinter.ttk ^
     --hidden-import tkinter.filedialog ^
@@ -116,12 +101,25 @@ if errorlevel 1 (
     pause & exit /b 1
 )
 
+:: ВАЖНО: копируем свежий db_dump.py рядом с exe
+:: GUI ищет его через Path(sys.executable).parent / "db_dump.py"
+echo.
+echo  Copying db_dump.py to dist\...
+copy /y "db_dump.py" "dist\db_dump.py" >nul
+if errorlevel 1 (
+    echo  [ERROR] Failed to copy db_dump.py to dist\
+    pause & exit /b 1
+)
+echo  db_dump.py copied OK
+
 echo.
 echo  =========================================
-echo   Done!  dist\db_dump_gui.exe
+echo   Done!
 echo  =========================================
 echo.
-echo  dist\db_dump_gui.exe  — готово к использованию
-echo  (db_dump.py встроен внутрь exe, отдельно не нужен)
+echo  dist\db_dump_gui.exe   — запускаемый файл
+echo  dist\db_dump.py        — CLI модуль (должен лежать рядом с exe)
+echo.
+echo  Отдавать пользователям оба файла из папки dist\
 echo.
 pause
