@@ -561,7 +561,6 @@ def restore(cfg: ConnectionConfig, dump_dir: Path,
         print_step("→", filename)
         cmd = ["mysql"] + build_base_args(cfg) + [
             "--default-character-set=utf8mb4",
-            "--binary-mode",   # не трогать \r\n, не интерпретировать charset на ходу
         ]
         if force:
             cmd.append("--force")   # продолжать при ошибках (не останавливаться)
