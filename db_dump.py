@@ -184,12 +184,17 @@ def build_dump_args(cfg: ConnectionConfig) -> list:
 
 
 def _filter_stderr(text: str) -> list:
-    noise = [
+    noise_keywords = [
         "Using a password on the command line",
-        "Warning: Using a password",
+        "mysql: [Warning]",
     ]
-    return [l for l in text.splitlines() if not any(n in l for n in noise)]
 
+    lines = text.splitlines()
+
+    return [
+        l for l in lines
+        if not any(n in l for n in noise_keywords)
+    ]
 
 # Скрываем консольные окна на Windows для всех дочерних процессов
 _POPEN_KW: dict = {}
