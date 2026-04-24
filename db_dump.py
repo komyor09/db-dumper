@@ -270,32 +270,32 @@ def run_to_file(cmd: list, output_file: Path, description: str = "") -> bool:
 
 
 def run_from_file(cmd: list, input_file: Path, description: str = "") -> bool:
+    """
+    Подаёт содержимое файла на stdin процесса.
+    Использует communicate() вместо ручной чанковой записи чтобы избежать:
+      - BrokenPipeError (mysql упал, закрыл stdin, мы продолжаем писать)
+      - Deadlock (stderr буфер переполнен пока мы пишем в stdin)
+    """
     label = description or input_file.name
     try:
-        file_size = input_file.stat().st_size
-        with open(input_file, "rb") as f:
-            proc = subprocess.Popen(
-                cmd,
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                **_POPEN_KW,
-            )
-            chunk_size = 256 * 1024  # 256 KB
-            sent = 0
-            while True:
-                chunk = f.read(chunk_size)
-                if not chunk:
-                    break
-                proc.stdin.write(chunk)
-                sent += len(chunk)
-                _print_progress(sent, file_size, label)
-            proc.stdin.close()
-            proc.wait()
-        _print_progress(file_size, file_size, label, done=True)
+        data = input_file.read_bytes()
+        print(f"  →  {label} ({len(data) // 1024} KB)", end="", flush=True)
+
+        proc = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            **_POPEN_KW,
+        )
+        # communicate() атомарно: пишет stdin + читает stdout/stderr + ждёт завершения
+        # Не даёт BrokenPipeError и deadlock
+        _, stderr_bytes = proc.communicate(input=data)
+
+        print()  # перенос строки после прогресса
         if proc.returncode != 0:
             print_err(f"{label} — код {proc.returncode}")
-            lines = _filter_stderr(proc.stderr.read().decode("utf-8", errors="replace"))
+            lines = _filter_stderr(stderr_bytes.decode("utf-8", errors="replace"))
             if lines:
                 print_err("\n    ".join(lines))
             return False
